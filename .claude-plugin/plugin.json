@@ -1,0 +1,21 @@
+{
+  "name": "magicmarkets-datafeed",
+  "description": "Real-time sports betting odds streamed over WebSocket from data.magicmarkets.com. Helps developers integrate the MagicMarkets Datafeed API into odds comparison platforms, trading dashboards, and B2B data products.",
+  "version": "1.0.0",
+  "author": {
+    "name": "MagicMarkets",
+    "url": "https://magicmarkets.com"
+  },
+  "homepage": "https://data.magicmarkets.com",
+  "license": "MIT",
+  "keywords": [
+    "sports-betting",
+    "odds",
+    "websocket",
+    "magicmarkets",
+    "datafeed",
+    "live-prices",
+    "bookmaker",
+    "odds-comparison"
+  ]
+}
