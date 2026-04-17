@@ -60,15 +60,17 @@ curl -X POST https://data.magicmarkets.com/v1/login \
     "active": true,
     "ccy_code": "GBP",
     "config": {
-      "prices_bookies": ["bdaq", "bf", "ibc", "isn", "mbook", "molly", "pin88", "sbo"],
+      "prices_bookies": ["<source_1>", "<source_2>", "..."],
       "superuser": false
     }
   }
 }
 ```
 
-The `prices_bookies` array controls which bookmakers feed into your best-price
-calculation. The token is a 32-character hex string valid for **24 hours**.
+The `prices_bookies` array contains the opaque source codes that feed into
+your best-price calculation. Your own login response will contain the actual
+codes your account is subscribed to — treat them as opaque identifiers.
+The token is a 32-character hex string valid for **24 hours**.
 
 Other REST endpoints:
 - `POST /v1/logout` — invalidate token (`Authorization: Token <token>`)
@@ -166,22 +168,21 @@ No bookmaker offers this market anymore:
 
 For each `(sport, event_id, bet_type)`:
 
-1. Collect offers from all bookmakers in your `prices_bookies` set
-2. For exchanges, adjust: `adjusted = price - (price - 1) * commission`
+1. Collect offers from all sources in your `prices_bookies` set
+2. For exchange-style sources, adjust for commission:
+   `adjusted = price - (price - 1) * commission`
 3. Round down to 3 decimal places
 4. Return the **maximum** adjusted price
 
-**Exchange commissions:**
+Commission rates are typically around 1–2% for exchange-style sources and zero
+for the rest. Your account configuration determines which sources are
+included and whether their commission is already applied to the delivered
+prices. Contact MagicMarkets for the commission schedule applicable to your
+account.
 
-| Bookmaker | Code | Commission |
-|-----------|------|------------|
-| Betfair | `bf` | 2% |
-| Betdaq | `bdaq` | 2% |
-| Matchbook | `mbook` | 1.8% |
-
-All others (IBC, ISN, Molly, Pinnacle, SBOBet, Singbet) have no adjustment.
-
-**Example:** Betfair offers 2.50 → adjusted = `2.50 - (2.50 - 1) * 0.02` = **2.47**
+**Example:** a source offering 2.50 at 2% commission → adjusted =
+`2.50 - (2.50 - 1) * 0.02` = **2.47**. If another source in your set offers
+2.48 with no commission, the best price returned is 2.48.
 
 ---
 
@@ -287,19 +288,17 @@ ws.on("message", (raw) => {
 | `snooker` | Snooker | `arf` | Australian rules football |
 | `volley` | Volleyball | | |
 
-### Bookmakers
+### Sources
 
-| Code | Name | Commission |
-|------|------|------------|
-| `bdaq` | Betdaq | 2% |
-| `bf` | Betfair | 2% |
-| `ibc` | IBC | — |
-| `isn` | ISN | — |
-| `mbook` | Matchbook | 1.8% |
-| `molly` | Molly | — |
-| `pin88` | Pinnacle | — |
-| `sbo` | SBOBet | — |
-| `sing2` | Singbet | — |
+The `prices_bookies` array in your login response contains the opaque source
+codes your account is subscribed to. Treat them as identifiers — do not hard-
+code them into your application logic, since the set can change over time and
+varies by account. If you need the current list of sources active on your
+account, use the `prices_bookies` returned by `/v1/login` or `/v1/config`.
+
+Some sources are exchange-style (commission applied before ranking), others
+are sharp books (no commission adjustment). Contact MagicMarkets for details
+on the commission schedule and source inventory applicable to your account.
 
 ### Bet types
 
