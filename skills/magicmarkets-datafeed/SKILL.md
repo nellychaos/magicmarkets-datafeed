@@ -188,7 +188,7 @@ account.
 
 ## Code examples
 
-### Python — connect and stream
+### Python — connect, stream, and reconnect with state reset
 
 ```python
 import asyncio, json, websockets, requests
@@ -196,13 +196,10 @@ import asyncio, json, websockets, requests
 USERNAME = "YOUR_USER"
 PASSWORD = "YOUR_PASS"
 
-# 1. Login
-token = requests.post("https://data.magicmarkets.com/v1/login",
-    json={"username": USERNAME, "password": PASSWORD}).json()["token"]
-
-# 2. In-memory state
+# In-memory state
 events = {}   # (sport, event_id) -> metadata dict
 prices = {}   # (sport, event_id, bet_type) -> price float
+last_ts = 0.0
 
 def process(msg):
     action, table = msg[0], msg[1]
@@ -218,18 +215,43 @@ def process(msg):
         elif action == "delete":
             prices.pop(key, None)
 
-# 3. Stream
-async def stream():
-    uri = f"wss://data.magicmarkets.com/v1/stream?token={token}"
-    async with websockets.connect(uri) as ws:
-        async for raw in ws:
-            frame = json.loads(raw)
-            for msg in frame["data"]:
-                process(msg)
-            print(f"{len(events)} events, {len(prices)} prices")
+def get_token():
+    resp = requests.post("https://data.magicmarkets.com/v1/login",
+        json={"username": USERNAME, "password": PASSWORD})
+    resp.raise_for_status()
+    return resp.json()["token"]
 
-asyncio.run(stream())
+async def stream_forever():
+    """Reconnect loop — reset state on every (re)connect because the
+    server sends a fresh full snapshot each time."""
+    token = get_token()
+    while True:
+        events.clear()      # fresh snapshot coming
+        prices.clear()
+        try:
+            uri = f"wss://data.magicmarkets.com/v1/stream?token={token}"
+            async with websockets.connect(uri) as ws:
+                async for raw in ws:
+                    global last_ts
+                    frame = json.loads(raw)
+                    last_ts = frame["ts"]
+                    for msg in frame["data"]:
+                        process(msg)
+        except (websockets.exceptions.ConnectionClosed, OSError) as e:
+            print(f"Disconnected: {e}; reconnecting in 1s")
+            await asyncio.sleep(1)
+        except websockets.exceptions.InvalidStatus:
+            # 401: token expired (24h TTL); re-login
+            token = get_token()
+
+asyncio.run(stream_forever())
 ```
+
+**Why `events.clear()` before every reconnect:** the server sends a full
+snapshot of the currently-active set on connect. Events that were deleted
+upstream during your disconnect won't be in the snapshot. If you keep
+stale entries, they'll never be removed. Clearing and re-ingesting is
+the simpler invariant than trying to reconcile deltas.
 
 ### Node.js — connect and stream
 
@@ -258,6 +280,48 @@ ws.on("message", (raw) => {
   console.log(`${events.size} events, ${prices.size} prices`);
 });
 ```
+
+### Persisting a snapshot to disk
+
+For bulk analytics or to share state across processes, you'll often want
+to snapshot the in-memory state to a file and re-load it later. Two
+gotchas:
+
+1. **Tuple keys aren't JSON-serialisable.** The natural `(sport, event_id)`
+   tuple key works great in memory but `json.dump(events)` raises
+   `TypeError: keys must be str, int, float, bool or None`. Convert to
+   pipe-delimited strings on write and split on load.
+2. **Snapshots are point-in-time** — the messages have no sequence number
+   of their own. Record the server's last `frame["ts"]` you processed so
+   downstream consumers can age-check rather than trusting file mtime.
+
+```python
+import json
+
+def write_snapshot(events: dict, prices: dict, last_ts: float, path: str):
+    payload = {
+        "last_ts": last_ts,
+        "events": {f"{sp}|{eid}": meta
+                   for (sp, eid), meta in events.items()},
+        "prices": {f"{sp}|{eid}|{bt}": {"price": p}
+                   for (sp, eid, bt), p in prices.items()},
+    }
+    with open(path, "w") as f:
+        json.dump(payload, f)
+
+def load_snapshot(path: str) -> tuple[dict, dict, float]:
+    with open(path) as f:
+        payload = json.load(f)
+    events = {tuple(k.split("|", 1)): v for k, v in payload["events"].items()}
+    prices = {tuple(k.split("|", 2)): v["price"] for k, v in payload["prices"].items()}
+    return events, prices, payload.get("last_ts", 0.0)
+```
+
+**Snapshot age policy.** Active markets update sub-second. A 5-minute
+snapshot is usually fine for pre-match screening; for in-play analytics,
+reconnect and re-ingest rather than trusting a stale snapshot. Check
+`time.time() - last_ts` against a freshness budget before using the
+loaded state.
 
 ---
 
@@ -302,20 +366,33 @@ on the commission schedule and source inventory applicable to your account.
 
 ### Bet types
 
-Canonical comma-separated identifiers:
+Bet-type strings use a canonical comma-separated grammar shared with the
+Trading API. Every string starts with `for,...` (pick the outcome to
+happen) or `against,...` (pick it NOT to happen). For the full
+sport-keyed list of moneyline / handicap / totals patterns, see the
+Bet-type patterns section in the `magicmarkets-trading` skill — the
+same grammar drives betslip creation there.
+
+**Common patterns you'll see in the stream:**
 
 | Pattern | Meaning |
 |---------|---------|
-| `for,1x2,1` | Match result, home win |
-| `for,1x2,x` | Match result, draw |
-| `for,1x2,2` | Match result, away win |
-| `for,ah,h,-6` | Asian handicap, home -6 |
-| `for,ah,a,6` | Asian handicap, away +6 |
-| `for,ou,o,42` | Over/under, over 42 |
-| `for,ou,u,42` | Over/under, under 42 |
-| `for,h` | Head-to-head / moneyline |
+| `for,h` / `for,a` / `for,d` | Soccer (`fb`) moneyline: home / away / draw |
+| `for,ml,h` / `for,ml,a` | Basketball / MMA moneyline |
+| `for,tp,all,ml,h` / `for,tp,all,ml,a` | Ice hockey / NFL / MLB moneyline incl. OT |
+| `for,tp,reg,wdw,h/d/a` | Regulation-time win-draw-win (NHL, etc.) |
+| `for,dnb,h` / `for,dnb,a` | Draw-no-bet (MMA, boxing) |
+| `for,tset,all,vset1,p1/p2` | Tennis total sets, player 1 vs player 2 |
+| `for,ah,h,-6` | Asian handicap home -1.5 |
+| `for,ah,a,6` | Asian handicap away +1.5 |
+| `for,ou,o,42` | Over/under, over line |
+| `for,ahover,N` / `for,ahunder,N` | Combined AH-over / AH-under (fb corners etc.) |
 
-The exact set varies by sport and market availability.
+**Quarter-point line encoding.** Asian handicap and over/under lines are
+integers in **quarter-point units** — divide by 4 to get the displayed
+line. So `-6` displays as `-1.5`, `-8` as `-2.0`, `20` as `+5.0`. The
+same encoding applies on the Trading API side; a pattern you see in the
+Datafeed can be used verbatim in a `POST /v1/betslips/` call.
 
 ---
 
@@ -328,6 +405,27 @@ The exact set varies by sport and market availability.
 | No prices for a sport | Your `prices_bookies` config may not cover that sport |
 | Prices seem low | Exchange commission is being deducted (correct behavior) |
 | Missing events after reconnect | Expected — snapshot only includes currently active events |
+
+---
+
+## Known limitations
+
+- **Server-to-client only.** No client-side subscribe/filter protocol —
+  you receive the full stream for your account and filter locally. Any
+  message you send back closes the connection with an error.
+- **Source set can change silently.** The `prices_bookies` array in your
+  login response can grow, shrink, or rotate between sessions. Don't
+  cache it across process restarts.
+- **24-hour token TTL, no renewal.** There is no refresh endpoint; at or
+  before the 24-hour mark you must re-`POST /v1/login`. A long-running
+  stream will disconnect silently after ~24 hours. Pre-emptively re-login
+  at 23 hours if you're running a persistent process.
+- **Point-in-time snapshots.** The server sends a fresh full snapshot on
+  connect but no sequence number. On reconnect you must clear local
+  state and re-ingest (see the reconnect example above).
+- **In-play fields are football-specific.** `score` and `ir_time` are
+  populated for in-play football events only; other sports leave them
+  null even when `ir: true`. Check the sport before reading them.
 
 ---
 

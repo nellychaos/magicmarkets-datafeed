@@ -11,7 +11,7 @@ Base URL: `https://data.magicmarkets.com`
 5. [Best price calculation](#best-price-calculation) (lines ~270-300)
 6. [Reconnection](#reconnection) (lines ~305-320)
 7. [Sport codes](#sport-codes) (lines ~325-365)
-8. [Bookmakers](#bookmakers) (lines ~370-400)
+8. [Sources](#sources) (lines ~370-400)
 9. [Bet types](#bet-types) (lines ~405-430)
 
 ---
